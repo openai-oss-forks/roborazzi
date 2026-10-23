@@ -291,9 +291,64 @@ class AwtRoboCanvas private constructor(
     }
   }
 
+  private var recordImageTransferred = false
+
+  /**
+   * Consumes this canvas and transfers its prepared pixels to one record operation. The image may
+   * share the cropped canvas's backing array; callers must only release this canvas afterward.
+   * Pending drawing and resizing finish before the image crosses a thread boundary.
+   */
+  @InternalRoborazziApi
+  internal fun takeRecordImage(resizeScale: Double): BufferedImage {
+    check(!recordImageTransferred) { "The record image was already transferred" }
+    drawPendingDraw()
+    val image = croppedImage.scale(resizeScale)
+    recordImageTransferred = true
+    if (image.raster.dataBuffer !== bufferedImage.raster.dataBuffer) {
+      bufferedImage.flush()
+      if (croppedImage !== bufferedImage) {
+        croppedImage.flush()
+      }
+    }
+    textCache.clear()
+    return image
+  }
+
+  /** Transfers the finished raster and its writer to the capture session. */
+  @InternalRoborazziApi
+  fun prepareRecordOutput(file: File, resizeScale: Double, context: Map<String, Any>): AwtRecordPayload {
+    val image = takeRecordImage(resizeScale)
+    var writer: PreparedPngWrite? = null
+    try {
+      val directory = file.parentFile
+      try {
+        if (!directory.exists()) {
+          directory.mkdirs()
+        }
+      } catch (_: Exception) {
+        // Match synchronous save: the encoder reports directory and output failures.
+      }
+      writer = PreparedPngWrite.prepare(file, image, context)
+      return AwtRecordPayload(image, writer)
+    } catch (failure: Throwable) {
+      try {
+        writer?.close()
+      } catch (cleanupFailure: Throwable) {
+        if (cleanupFailure !== failure) {
+          failure.addSuppressed(cleanupFailure)
+        }
+      } finally {
+        image.flush()
+      }
+      throw failure
+    }
+  }
+
   override fun release() {
-    bufferedImage.flush()
-    croppedImage.flush()
+    if (!recordImageTransferred) {
+      bufferedImage.flush()
+      croppedImage.flush()
+    }
     textCache.clear()
   }
 

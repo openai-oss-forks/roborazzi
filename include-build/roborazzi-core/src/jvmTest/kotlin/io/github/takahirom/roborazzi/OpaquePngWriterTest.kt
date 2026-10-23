@@ -1,6 +1,7 @@
 package io.github.takahirom.roborazzi
 
 import com.github.takahirom.roborazzi.JvmImageIoFormat
+import com.github.takahirom.roborazzi.PreparedPngWrite
 import com.github.takahirom.roborazzi.getWriter
 import com.github.takahirom.roborazzi.opaqueRgbPngImage
 import com.github.takahirom.roborazzi.writeMetadata
@@ -10,6 +11,7 @@ import java.awt.image.BufferedImage
 import java.awt.image.RenderedImage
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.Executors
 import javax.imageio.IIOImage
 import javax.imageio.ImageIO
 import javax.imageio.ImageTypeSpecifier
@@ -19,7 +21,9 @@ import javax.imageio.metadata.IIOMetadata
 import javax.imageio.metadata.IIOMetadataFormatImpl
 import javax.imageio.spi.IIORegistry
 import javax.imageio.spi.ImageWriterSpi
+import javax.imageio.spi.ImageOutputStreamSpi
 import javax.imageio.stream.ImageOutputStream
+import javax.imageio.stream.FileImageOutputStream
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -202,6 +206,15 @@ class OpaquePngWriterTest {
           format.awtImageWriter.write(file, mapOf("description" to "metadata"), opaqueImage(7, 9))
         }
         assertContentEquals(original, file.readBytes())
+        PreparedPngWrite.prepare(file, opaqueImage(7, 9), emptyMap()).use { prepared ->
+          assertFalse(prepared.canRunOffThread)
+          prepared.write()
+        }
+        assertContentEquals(original, file.readBytes())
+        assertFailsWith<IllegalArgumentException> {
+          PreparedPngWrite.prepare(file, opaqueImage(7, 9), mapOf("description" to "metadata"))
+        }
+        assertContentEquals(original, file.readBytes())
       }
     } finally {
       providers.forEach { registry.registerServiceProvider(it) }
@@ -234,6 +247,156 @@ class OpaquePngWriterTest {
       assertTrue(provider.writeParams.all { it == null }, "Fallback must keep the original write parameters")
     } finally {
       registry.deregisterServiceProvider(provider)
+    }
+  }
+
+  @Test
+  fun preparedPngMatchesSynchronousBytesAndMetadata() {
+    for (opaque in listOf(true, false)) {
+      val image = opaqueImage(17, 19)
+      if (!opaque) {
+        image.setRGB(8, 9, 0x7F123456)
+      }
+      val originalPixels = pixels(image)
+      for (context in listOf(emptyMap(), mapOf("description" to "prepared", "count" to 7))) {
+        withPngFile { expected ->
+          withPngFile { actual ->
+            actual.writeBytes(ByteArray(16_384) { 42 })
+            JvmImageIoFormat().awtImageWriter.write(expected, context, image)
+            PreparedPngWrite.prepare(actual, image, context).use { prepared ->
+              assertTrue(prepared.canRunOffThread)
+              prepared.write()
+              assertFailsWith<IllegalStateException> { prepared.write() }
+            }
+            assertContentEquals(expected.readBytes(), actual.readBytes())
+            assertContentEquals(originalPixels, pixels(image))
+            assertEquals(context.mapValues { it.value.toString() }, textMetadata(actual))
+          }
+        }
+      }
+    }
+  }
+
+  @Test
+  fun preparedCustomProviderIsSelectedOnceAndRequiresSynchronousExecution() {
+    val image = opaqueImage(17, 19)
+    val stock = getWriter(image, "png")
+    val stockProvider = stock.originatingProvider
+    stock.dispose()
+    val provider = RecordingPngProvider(stockProvider)
+    val registry = IIORegistry.getDefaultInstance()
+    registry.registerServiceProvider(provider)
+    registry.setOrdering(ImageWriterSpi::class.java, provider, stockProvider)
+    try {
+      for (context in listOf(emptyMap(), mapOf("description" to "prepared metadata"))) {
+        withPngFile { file ->
+          PreparedPngWrite.prepare(file, image, context).use { prepared ->
+            assertFalse(prepared.canRunOffThread)
+            prepared.write()
+          }
+          assertPixelsEqual(image, ImageIO.read(file))
+          assertEquals(context, textMetadata(file))
+          assertEquals(6, pngColorType(file))
+        }
+      }
+      assertEquals(2, provider.createdWriters)
+      assertEquals(2, provider.disposedWriters)
+      assertEquals(1, provider.renderedImageWrites)
+      assertTrue(provider.writeParams.all { it == null })
+      withPngFile { file ->
+        val original = byteArrayOf(4, 3, 2, 1)
+        file.writeBytes(original)
+        val failedValue = object {
+          override fun toString(): String = throw IllegalStateException("metadata failed")
+        }
+        assertFailsWith<IllegalStateException> {
+          PreparedPngWrite.prepare(file, image, mapOf("description" to failedValue))
+        }
+        assertContentEquals(original, file.readBytes())
+        assertEquals(3, provider.createdWriters)
+        assertEquals(3, provider.disposedWriters)
+      }
+    } finally {
+      registry.deregisterServiceProvider(provider)
+    }
+  }
+
+  @Test
+  fun customProviderReturningAStockWriterStillRequiresSynchronousExecution() {
+    val image = opaqueImage(17, 19)
+    val stock = getWriter(image, "png")
+    val stockProvider = stock.originatingProvider
+    stock.dispose()
+    val provider = RecordingPngProvider(stockProvider, returnStockWriter = true)
+    val registry = IIORegistry.getDefaultInstance()
+    registry.registerServiceProvider(provider)
+    registry.setOrdering(ImageWriterSpi::class.java, provider, stockProvider)
+    try {
+      withPngFile { file ->
+        PreparedPngWrite.prepare(file, image, emptyMap()).use { prepared ->
+          assertFalse(prepared.canRunOffThread)
+          prepared.write()
+        }
+        assertEquals(1, provider.createdWriters)
+        assertPixelsEqual(image, ImageIO.read(file))
+      }
+    } finally {
+      registry.deregisterServiceProvider(provider)
+    }
+  }
+
+  @Test
+  fun customFileStreamProviderKeepsSelectionAndWritingSynchronous() {
+    val registry = IIORegistry.getDefaultInstance()
+    val stock = registry.getServiceProviders(ImageOutputStreamSpi::class.java, true).asSequence()
+      .first { it.javaClass.name == "com.sun.imageio.spi.FileImageOutputStreamSpi" }
+    val provider = RecordingFileStreamProvider()
+    registry.registerServiceProvider(provider)
+    registry.setOrdering(ImageOutputStreamSpi::class.java, provider, stock)
+    try {
+      withPngFile { file ->
+        val image = opaqueImage(17, 19)
+        PreparedPngWrite.prepare(file, image, emptyMap()).use { prepared ->
+          assertFalse(prepared.canRunOffThread)
+          assertEquals(1, provider.createdStreams)
+          assertSame(Thread.currentThread(), provider.creationThread)
+          prepared.write()
+        }
+        assertEquals(1, provider.createdStreams)
+        assertSame(Thread.currentThread(), provider.creationThread)
+        assertPixelsEqual(image, ImageIO.read(file))
+      }
+    } finally {
+      registry.deregisterServiceProvider(provider)
+    }
+  }
+
+  @Test
+  fun preparedStockStreamFreezesProviderAndCacheSelectionBeforeWorkerWrite() {
+    val registry = IIORegistry.getDefaultInstance()
+    val stock = registry.getServiceProviders(ImageOutputStreamSpi::class.java, true).asSequence()
+      .first { it.javaClass.name == "com.sun.imageio.spi.FileImageOutputStreamSpi" }
+    val provider = RecordingFileStreamProvider()
+    val useCache = ImageIO.getUseCache()
+    val executor = Executors.newSingleThreadExecutor()
+    try {
+      withPngFile { file ->
+        val image = opaqueImage(17, 19)
+        PreparedPngWrite.prepare(file, image, mapOf("description" to "frozen stream")).use { prepared ->
+          assertTrue(prepared.canRunOffThread)
+          registry.registerServiceProvider(provider)
+          registry.setOrdering(ImageOutputStreamSpi::class.java, provider, stock)
+          ImageIO.setUseCache(!useCache)
+          executor.submit { prepared.write() }.get()
+        }
+        assertEquals(0, provider.createdStreams)
+        assertPixelsEqual(image, ImageIO.read(file))
+        assertEquals(mapOf("description" to "frozen stream"), textMetadata(file))
+      }
+    } finally {
+      executor.shutdown()
+      registry.deregisterServiceProvider(provider)
+      ImageIO.setUseCache(useCache)
     }
   }
 
@@ -332,8 +495,27 @@ class OpaquePngWriterTest {
     }
   }
 
+  /** A custom output provider returns a stock stream while exposing the construction thread. */
+  private class RecordingFileStreamProvider : ImageOutputStreamSpi(
+    "Roborazzi test", "1.0", File::class.java,
+  ) {
+    var createdStreams = 0
+    var creationThread: Thread? = null
+
+    override fun createOutputStreamInstance(output: Any, useCache: Boolean, cacheDir: File?): ImageOutputStream {
+      createdStreams++
+      creationThread = Thread.currentThread()
+      return FileImageOutputStream(output as File)
+    }
+
+    override fun getDescription(locale: Locale?): String = "Records file stream construction"
+  }
+
   /** A different provider delegates encoding while recording the public ImageWriter call it receives. */
-  private class RecordingPngProvider(private val delegate: ImageWriterSpi) : ImageWriterSpi(
+  private class RecordingPngProvider(
+    private val delegate: ImageWriterSpi,
+    private val returnStockWriter: Boolean = false,
+  ) : ImageWriterSpi(
     "Roborazzi test", "1.0", arrayOf("png"), arrayOf("png"), arrayOf("image/png"),
     RecordingPngWriter::class.java.name, arrayOf(ImageOutputStream::class.java), null,
     false, null, null, null, null, true, null, null, null, null,
@@ -347,7 +529,11 @@ class OpaquePngWriterTest {
 
     override fun createWriterInstance(extension: Any?): ImageWriter {
       createdWriters++
-      return RecordingPngWriter(this, delegate.createWriterInstance())
+      return if (returnStockWriter) {
+        delegate.createWriterInstance()
+      } else {
+        RecordingPngWriter(this, delegate.createWriterInstance())
+      }
     }
 
     override fun getDescription(locale: Locale?): String = "Records PNG writer calls"

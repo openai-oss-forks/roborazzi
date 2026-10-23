@@ -220,18 +220,7 @@ data class RoborazziOptions(
 
       override fun report(captureResult: CaptureResult, roborazziTaskType: RoborazziTaskType) {
         val absolutePath = roborazziToAbsolutePath(roborazziSystemPropertyResultDirectory())
-        val nameWithoutExtension = when (captureResult) {
-          is CaptureResult.Added -> captureResult.compareFile
-          is CaptureResult.Changed -> captureResult.goldenFile
-          is CaptureResult.Unchanged -> captureResult.goldenFile
-          is CaptureResult.Recorded -> captureResult.goldenFile
-        }.nameWithoutExtension
-        val reportFileName =
-          getReportFileName(absolutePath, captureResult.timestampNs, nameWithoutExtension)
-
-        val jsonResult = json.encodeToJsonElement(captureResult)
-        KotlinxIo.writeText(reportFileName, jsonResult.toString())
-        roborazziDebugLog { "JsonResult file($reportFileName) has been written" }
+        writeCaptureResultJson(captureResult, absolutePath)
       }
 
     }
@@ -333,3 +322,20 @@ private fun getAssertErrorOrNull(captureResult: CaptureResult): AssertionError? 
       null
     }
   }
+
+
+/** Writes one completed capture into an already resolved report directory. */
+internal fun writeCaptureResultJson(captureResult: CaptureResult, absolutePath: String) {
+  val nameWithoutExtension = when (captureResult) {
+    is CaptureResult.Added -> captureResult.compareFile
+    is CaptureResult.Changed -> captureResult.goldenFile
+    is CaptureResult.Unchanged -> captureResult.goldenFile
+    is CaptureResult.Recorded -> captureResult.goldenFile
+  }.nameWithoutExtension
+  val reportFileName =
+    getReportFileName(absolutePath, captureResult.timestampNs, nameWithoutExtension)
+
+  val jsonResult = json.encodeToJsonElement(captureResult)
+  KotlinxIo.writeText(reportFileName, jsonResult.toString())
+  roborazziDebugLog { "JsonResult file($reportFileName) has been written" }
+}
