@@ -268,6 +268,29 @@ val roborazziRule = RoborazziRule(
 )
 ```
 
+## Record an attached View while the test cleans up
+
+In record mode, `captureRoboImageAsync` captures the View before it returns. The session can encode
+the PNG while the test tears down the View. Call `await()` on the thread that created the session
+before reading the PNG or its report, or starting another capture. Closing the session also waits
+for the write. Both operations report write failures.
+
+```kotlin
+@OptIn(ExperimentalRoborazziApi::class)
+fun record(view: View, file: File, tearDownView: () -> Unit) {
+  RecordCaptureSession().use { session ->
+    val pending = view.captureRoboImageAsync(session, file)
+    tearDownView()
+    pending.await()
+  }
+}
+```
+
+The session keeps at most one raster. The default limit is 8 MiB, including the full backing array
+of a cropped image. Larger images finish on the calling thread. Background encoding requires the
+built-in ARGB PNG writer, the JDK ImageIO providers, and the default reporter. Other capture modes,
+UI tree dumps, and mutable context values use the synchronous capture path.
+
 ## Experimental WebP support and other image formats
 
 You can set `roborazzi.record.image.extension` to `webp` in your `gradle.properties` file to generate WebP images.

@@ -685,7 +685,8 @@ private fun saveAllImage(
   }
 }
 
-private class ImageCaptureViewAction(
+/** Shares synchronous pixel capture with the explicit record-session entry point. */
+internal class ImageCaptureViewAction(
   val roborazziOptions: RoborazziOptions,
   val goldenFile: File? = null,
   val saveAction: (AwtRoboCanvas, UiTreeDumpWriteResult) -> Unit

@@ -53,3 +53,26 @@ private fun buildContextData(roborazziOptions: RoborazziOptions): Map<String, An
   } ?: mapOf()
   return base + classNameMap
 }
+
+
+/** Snapshots capture context after the same golden-name validation used by synchronous output. */
+@InternalRoborazziApi
+fun prepareRecordContextData(goldenFile: File, options: RoborazziOptions): Map<String, Any> {
+  validateGoldenFileNameOrThrow(goldenFile.absolutePath)
+  return buildContextData(options).toMap()
+}
+
+/** Freezes the destination while leaving report creation on the caller after successful encoding. */
+@InternalRoborazziApi
+fun prepareRecordCompletion(goldenFile: File, contextData: Map<String, Any>): (Long) -> Unit {
+  val goldenPath = goldenFile.absolutePath
+  val resultDirectory = roborazziToAbsolutePath(roborazziSystemPropertyResultDirectory())
+  return { writtenAtNs ->
+    roborazziDebugLog { "processOutputImageAndReport: record goldenFile: $goldenPath" }
+    roborazziMakeDirectories(resultDirectory)
+    writeCaptureResultJson(
+      CaptureResult.Recorded(goldenPath, writtenAtNs, contextData),
+      resultDirectory,
+    )
+  }
+}

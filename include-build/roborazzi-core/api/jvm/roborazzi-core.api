@@ -492,6 +492,7 @@ public final class com/github/takahirom/roborazzi/ImageIoFormat_commonJvmKt {
 	public static final fun ImageIoFormat ()Lcom/github/takahirom/roborazzi/ImageIoFormat;
 	public static final fun LosslessWebPImageIoFormat ()Lcom/github/takahirom/roborazzi/ImageIoFormat;
 	public static final fun getWriter (Ljava/awt/image/RenderedImage;Ljava/lang/String;)Ljavax/imageio/ImageWriter;
+	public static final fun supportsPreparedPngWrite (Lcom/github/takahirom/roborazzi/ImageIoFormat;)Z
 	public static final fun writeMetadata (Ljavax/imageio/ImageWriter;Ljava/util/Map;Ljava/awt/image/BufferedImage;)Ljavax/imageio/metadata/IIOMetadata;
 }
 
@@ -530,7 +531,22 @@ public final class com/github/takahirom/roborazzi/KotlinxIoKt {
 public abstract interface annotation class com/github/takahirom/roborazzi/Poko : java/lang/annotation/Annotation {
 }
 
+public final class com/github/takahirom/roborazzi/PreparedPngWrite : java/lang/AutoCloseable {
+	public static final field Companion Lcom/github/takahirom/roborazzi/PreparedPngWrite$Companion;
+	public synthetic fun <init> (Ljavax/imageio/ImageWriter;ZLkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun close ()V
+	public final fun getCanRunOffThread ()Z
+	public final fun write ()V
+}
+
+public final class com/github/takahirom/roborazzi/PreparedPngWrite$Companion {
+	public final fun prepare (Ljava/io/File;Ljava/awt/image/BufferedImage;Ljava/util/Map;Z)Lcom/github/takahirom/roborazzi/PreparedPngWrite;
+	public static synthetic fun prepare$default (Lcom/github/takahirom/roborazzi/PreparedPngWrite$Companion;Ljava/io/File;Ljava/awt/image/BufferedImage;Ljava/util/Map;ZILjava/lang/Object;)Lcom/github/takahirom/roborazzi/PreparedPngWrite;
+}
+
 public final class com/github/takahirom/roborazzi/ProcessOutputImageAndReportKt {
+	public static final fun prepareRecordCompletion (Ljava/io/File;Ljava/util/Map;)Lkotlin/jvm/functions/Function1;
+	public static final fun prepareRecordContextData (Ljava/io/File;Lcom/github/takahirom/roborazzi/RoborazziOptions;)Ljava/util/Map;
 	public static final fun processOutputImageAndReport (Lcom/github/takahirom/roborazzi/RoboCanvas;Ljava/io/File;Lcom/github/takahirom/roborazzi/RoborazziOptions;Lcom/github/takahirom/roborazzi/EmptyCanvasFactory;Lcom/github/takahirom/roborazzi/CanvasFactoryFromFile;Lcom/github/takahirom/roborazzi/ComparisonCanvasFactory;Lkotlin/jvm/functions/Function1;)V
 	public static synthetic fun processOutputImageAndReport$default (Lcom/github/takahirom/roborazzi/RoboCanvas;Ljava/io/File;Lcom/github/takahirom/roborazzi/RoborazziOptions;Lcom/github/takahirom/roborazzi/EmptyCanvasFactory;Lcom/github/takahirom/roborazzi/CanvasFactoryFromFile;Lcom/github/takahirom/roborazzi/ComparisonCanvasFactory;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)V
 }

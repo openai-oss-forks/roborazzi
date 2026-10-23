@@ -15,7 +15,11 @@ import javax.imageio.ImageWriter
 import javax.imageio.metadata.IIOMetadata
 import javax.imageio.metadata.IIOMetadataFormatImpl
 import javax.imageio.metadata.IIOMetadataNode
+import javax.imageio.spi.IIORegistry
+import javax.imageio.spi.ImageWriterSpi
+import javax.imageio.spi.ImageOutputStreamSpi
 import javax.imageio.stream.FileImageOutputStream
+import javax.imageio.stream.ImageOutputStream
 
 @ExperimentalRoborazziApi
 @Suppress("FunctionName")
@@ -46,74 +50,35 @@ fun interface AwtImageLoader {
 
 @ExperimentalRoborazziApi
 data class JvmImageIoFormat(
-  val awtImageWriter: AwtImageWriter = AwtImageWriter { file, contextData, bufferedImage ->
-    val imageExtension = file.extension.ifBlank { "png" }
-    if (contextData.isEmpty()) {
-      if (imageExtension.equals("png", ignoreCase = true) &&
-        bufferedImage.type == BufferedImage.TYPE_INT_ARGB
-      ) {
-        writePngWithoutMetadata(file, bufferedImage, imageExtension)
-      } else {
-        ImageIO.write(
-          bufferedImage,
-          imageExtension,
-          file
-        )
-      }
-      return@AwtImageWriter
-    }
-    val writer = getWriter(bufferedImage, imageExtension)
-    try {
-      val meta = writer.writeMetadata(contextData, bufferedImage)
-      // ImageOutputStream doesn't truncate an existing file, so writing a
-      // smaller image would leave trailing bytes of the previous image.
-      // See: https://github.com/takahirom/roborazzi/issues/881
-      file.delete()
-      ImageIO.createImageOutputStream(file).use { stream ->
-        writer.output = stream
-        val rgbImage = if (imageExtension.equals("png", ignoreCase = true)) {
-          writer.opaqueRgbPngImage(bufferedImage)
-        } else {
-          null
-        }
-        writer.write(IIOImage(rgbImage ?: bufferedImage, null, meta))
-      }
-    } finally {
-      writer.dispose()
-    }
-  },
+  val awtImageWriter: AwtImageWriter = defaultAwtImageWriter,
   val awtImageLoader: AwtImageLoader = AwtImageLoader { ImageIO.read(it) }
 ) : ImageIoFormat
 
 
-/**
- * Retains ImageIO.write's provider selection, no-provider behavior, and stream handling.
- * The selected writer also handles ineligible images, preserving provider construction side effects.
- */
-private fun writePngWithoutMetadata(file: File, image: BufferedImage, extension: String) {
-  val writers = ImageIO.getImageWriters(ImageTypeSpecifier.createFromRenderedImage(image), extension)
-  if (!writers.hasNext()) {
-    return
+/** Identity allows explicit record sessions to keep custom writers on the caller thread. */
+private val defaultAwtImageWriter = AwtImageWriter { file, contextData, bufferedImage ->
+  val imageExtension = file.extension.ifBlank { "png" }
+  if (imageExtension.equals("png", ignoreCase = true) && bufferedImage.type == BufferedImage.TYPE_INT_ARGB) {
+    PreparedPngWrite.prepare(file, bufferedImage, contextData, allowWorker = false).use { it.write() }
+    return@AwtImageWriter
   }
-  val writer = writers.next()
-  val stream = try {
-    // ImageIO leaves the previous file untouched until it finds a compatible writer.
+  if (contextData.isEmpty()) {
+    ImageIO.write(bufferedImage, imageExtension, file)
+    return@AwtImageWriter
+  }
+  val writer = getWriter(bufferedImage, imageExtension)
+  try {
+    val meta = writer.writeMetadata(contextData, bufferedImage)
+    // ImageOutputStream doesn't truncate an existing file, so writing a
+    // smaller image would leave trailing bytes of the previous image.
+    // See: https://github.com/takahirom/roborazzi/issues/881
     file.delete()
-    ImageIO.createImageOutputStream(file) ?: throw IIOException("Can't create an ImageOutputStream!")
-  } catch (failure: Throwable) {
-    AutoCloseable(writer::dispose).use { throw failure }
-  }
-  stream.use {
-    try {
+    ImageIO.createImageOutputStream(file).use { stream ->
       writer.output = stream
-      writer.write(writer.opaqueRgbPngImage(image) ?: image)
-    } finally {
-      try {
-        writer.dispose()
-      } finally {
-        stream.flush()
-      }
+      writer.write(IIOImage(bufferedImage, null, meta))
     }
+  } finally {
+    writer.dispose()
   }
 }
 
@@ -247,3 +212,111 @@ private fun losslessWebPWriter(): AwtImageWriter =
       writer.dispose()
     }
   }
+
+
+/** Identifies the built-in format without invoking a caller-supplied writer. */
+@InternalRoborazziApi
+fun ImageIoFormat.supportsPreparedPngWrite(): Boolean =
+  this is JvmImageIoFormat && awtImageWriter === defaultAwtImageWriter
+
+/** Holds the ImageIO writer and output stream selected on the capture thread. */
+@InternalRoborazziApi
+class PreparedPngWrite private constructor(
+  private val writer: ImageWriter?,
+  private val hasMetadata: Boolean,
+) : AutoCloseable {
+  private lateinit var image: BufferedImage
+  private var metadata: IIOMetadata? = null
+  private var stream: ImageOutputStream? = null
+  private var closed = false
+  var canRunOffThread: Boolean = false
+    private set
+
+  /** Writes once, using the same ImageWriter overload as ImageIO for an empty context. */
+  fun write() {
+    check(!closed) { "The PNG write is closed" }
+    use {
+      if (hasMetadata) {
+        writer?.write(IIOImage(image, null, metadata))
+      } else {
+        writer?.write(image)
+      }
+    }
+  }
+
+  override fun close() {
+    if (closed) {
+      return
+    }
+    closed = true
+    if (hasMetadata) {
+      try {
+        stream?.close()
+      } finally {
+        writer?.dispose()
+      }
+    } else {
+      stream.use {
+        try {
+          writer?.dispose()
+        } finally {
+          it?.flush()
+        }
+      }
+    }
+  }
+
+  companion object {
+    fun prepare(
+      file: File,
+      image: BufferedImage,
+      contextData: Map<String, Any>,
+      allowWorker: Boolean = true,
+    ): PreparedPngWrite {
+      require(image.type == BufferedImage.TYPE_INT_ARGB)
+      val extension = file.extension.ifBlank { "png" }
+      require(extension.equals("png", ignoreCase = true)) { "Expected a PNG file: $file" }
+      val stockProviders = allowWorker && hasOnlyJdkPngProviders(file)
+      val writers = ImageIO.getImageWriters(ImageTypeSpecifier.createFromRenderedImage(image), extension)
+      val writer = if (writers.hasNext()) { writers.next() } else { null }
+      val prepared = PreparedPngWrite(writer, contextData.isNotEmpty())
+      if (writer == null) {
+        // ImageIO.write leaves the file untouched when no writer accepts the image.
+        require(contextData.isEmpty()) { "No ImageWriter found for $extension" }
+        return prepared
+      }
+      try {
+        if (prepared.hasMetadata) {
+          prepared.metadata = writer.writeMetadata(contextData, image)
+        }
+        // ImageOutputStream does not truncate an existing file. See issue #881.
+        file.delete()
+        val stream = ImageIO.createImageOutputStream(file) ?: throw IIOException("Can't create an ImageOutputStream!")
+        prepared.stream = stream
+        writer.output = stream
+        prepared.image = writer.opaqueRgbPngImage(image) ?: image
+        prepared.canRunOffThread = stockProviders &&
+          writer.isJdkClass("com.sun.imageio.plugins.png.PNGImageWriter") &&
+          writer.originatingProvider.isJdkClass("com.sun.imageio.plugins.png.PNGImageWriterSpi") &&
+          stream.javaClass == FileImageOutputStream::class.java
+        return prepared
+      } catch (failure: Throwable) {
+        prepared.use { throw failure }
+      }
+    }
+  }
+}
+
+/** A custom provider can return a JDK writer or stream with caller-thread listeners attached. */
+private fun hasOnlyJdkPngProviders(file: File): Boolean {
+  val registry = IIORegistry.getDefaultInstance()
+  return registry.getServiceProviders(ImageWriterSpi::class.java, true).asSequence()
+    .filter { provider -> provider.formatNames.any { it.equals("png", ignoreCase = true) } }
+    .all { it.isJdkClass("com.sun.imageio.plugins.png.PNGImageWriterSpi") } &&
+    registry.getServiceProviders(ImageOutputStreamSpi::class.java, true).asSequence()
+      .filter { it.outputClass.isInstance(file) }
+      .all { it.isJdkClass("com.sun.imageio.spi.FileImageOutputStreamSpi") }
+}
+
+private fun Any?.isJdkClass(name: String): Boolean =
+  this != null && javaClass.classLoader == null && javaClass.name == name

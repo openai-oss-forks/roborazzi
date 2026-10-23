@@ -28,6 +28,13 @@ public final class com/github/takahirom/roborazzi/AnimatedImageEncoderKt {
 	public static final fun animatedImageEncoderFor (Ljava/io/File;)Lcom/github/takahirom/roborazzi/AnimatedImageEncoder;
 }
 
+public final class com/github/takahirom/roborazzi/AwtRecordPayload : java/lang/AutoCloseable {
+	public fun close ()V
+	public final fun getCanRunOffThread ()Z
+	public final fun getRetainedBytes ()J
+	public final fun write ()V
+}
+
 public final class com/github/takahirom/roborazzi/AwtRoboCanvas : com/github/takahirom/roborazzi/RoboCanvas {
 	public static final field Companion Lcom/github/takahirom/roborazzi/AwtRoboCanvas$Companion;
 	public static final field TRANSPARENT_BIT I
@@ -52,6 +59,7 @@ public final class com/github/takahirom/roborazzi/AwtRoboCanvas : com/github/tak
 	public fun getHeight ()I
 	public final fun getPixel (II)I
 	public fun getWidth ()I
+	public final fun prepareRecordOutput (Ljava/io/File;DLjava/util/Map;)Lcom/github/takahirom/roborazzi/AwtRecordPayload;
 	public fun release ()V
 	public fun save (Ljava/lang/String;DLjava/util/Map;Lcom/github/takahirom/roborazzi/ImageIoFormat;)V
 	public final fun textCalc (Ljava/util/List;)Lkotlin/Pair;
